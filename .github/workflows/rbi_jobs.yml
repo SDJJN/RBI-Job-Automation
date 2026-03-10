@@ -5,48 +5,74 @@ on:
     - cron: "0 */12 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: read
+  checks: read
+  deployments: read
+  issues: read
+  packages: read
+  pull-requests: read
+  statuses: read
+
 jobs:
   rbi-vacancy-workflow:
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch RBI Vacancy Page (with headers + retry)
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install jq -y
+
+      - name: Create database if not exists
         run: |
-          curl -L --retry 5 --retry-delay 5 \
-          -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-          -H "Accept: text/html" \
-          -H "Connection: keep-alive" \
+          if [ ! -f sent_jobs.json ]; then
+            echo "[]" > sent_jobs.json
+          fi
+
+      - name: Fetch RBI vacancy page
+        run: |
+          curl -L --retry 5 \
+          -H "User-Agent: Mozilla/5.0" \
           https://opportunities.rbi.org.in/scripts/vacancies.aspx \
           -o vacancies.html
 
-      - name: Extract Notification Links
+      - name: Extract notification links
         run: |
           grep -o 'bs_viewcontent.aspx?Id=[0-9]*' vacancies.html | sort -u > links.txt
 
-      - name: Visit Each Notification Page and Extract PDF
+      - name: Extract PDF links
         run: |
-          > results.txt
+          echo "[]" > new_jobs.json
+
           while read link
           do
             FULL_URL="https://opportunities.rbi.org.in/scripts/$link"
 
-            PAGE=$(curl -L --retry 5 \
-            -H "User-Agent: Mozilla/5.0" \
-            "$FULL_URL")
+            PAGE=$(curl -L -H "User-Agent: Mozilla/5.0" "$FULL_URL")
 
             PDF=$(echo "$PAGE" | grep -o 'https://rbidocs.rbi.org.in[^"]*PDF')
 
-            echo "Notification Page: $FULL_URL" >> results.txt
-            echo "PDF Link: $PDF" >> results.txt
-            echo "" >> results.txt
+            if [ ! -z "$PDF" ]; then
+              jq --arg url "$FULL_URL" --arg pdf "$PDF" \
+              '. += [{"url":$url,"pdf":$pdf}]' new_jobs.json > temp.json
+              mv temp.json new_jobs.json
+            fi
 
           done < links.txt
 
-      - name: Send Email Notification
+      - name: Find only new jobs
+        run: |
+          jq -s '.[0] - .[1]' new_jobs.json sent_jobs.json > latest_jobs.json
+
+      - name: Show results
+        run: cat latest_jobs.json
+
+      - name: Send email if new jobs exist
+        if: ${{ hashFiles('latest_jobs.json') != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -54,7 +80,20 @@ jobs:
           secure: true
           username: ${{ secrets.EMAIL_USER }}
           password: ${{ secrets.EMAIL_PASS }}
-          subject: RBI Vacancy Notifications
+          subject: New RBI Vacancy Notifications
           to: sachin.dhaka.btu@gmail.com
           from: ${{ secrets.EMAIL_USER }}
-          body: file://results.txt
+          body: file://latest_jobs.json
+
+      - name: Update sent jobs database
+        run: |
+          jq -s '.[0] + .[1]' sent_jobs.json new_jobs.json > merged.json
+          mv merged.json sent_jobs.json
+
+      - name: Commit updated database
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add sent_jobs.json
+          git commit -m "Update sent jobs database" || echo "No changes"
+          git push
