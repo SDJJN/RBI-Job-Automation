@@ -1,0 +1,61 @@
+name: RBI Vacancy Monitor
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+jobs:
+  rbi-vacancy-workflow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq mailutils
+
+      - name: Step 1 - Fetch RBI Vacancy Page
+        run: |
+          curl -s https://opportunities.rbi.org.in/scripts/vacancies.aspx -o vacancies.html
+
+      - name: Step 2 - Extract Notification Links
+        run: |
+          grep -o 'bs_viewcontent.aspx?Id=[0-9]*' vacancies.html | sort -u > links.txt
+
+      - name: Step 3 - Extract Date and Job Title
+        run: |
+          grep -E "tableheader|link2" vacancies.html > extracted_data.txt
+
+      - name: Step 4 - Visit Each Notification Page and Extract PDF
+        run: |
+          > results.txt
+          while read link; do
+            FULL_URL="https://opportunities.rbi.org.in/scripts/$link"
+            PAGE=$(curl -s $FULL_URL)
+            PDF=$(echo "$PAGE" | grep -o 'https://rbidocs.rbi.org.in[^"]*PDF')
+            echo "$FULL_URL" >> results.txt
+            echo "$PDF" >> results.txt
+            echo "" >> results.txt
+          done < links.txt
+
+      - name: Step 5 - Combine Extracted Data
+        run: |
+          echo "RBI Vacancy Notifications" > final_output.txt
+          echo "" >> final_output.txt
+          cat extracted_data.txt >> final_output.txt
+          echo "" >> final_output.txt
+          echo "PDF Links:" >> final_output.txt
+          cat results.txt >> final_output.txt
+
+      - name: Step 6 - Send Email
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        run: |
+          echo "Subject: RBI Vacancy Notifications" > mail.txt
+          cat final_output.txt >> mail.txt
+          sendmail sachin.dhaka.btu@gmail.com < mail.txt
